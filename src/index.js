@@ -11,6 +11,9 @@ import {
   countCompanyRecords,
   getCompanySpend,
   getCompanyChannels,
+  getSpendTrend,
+  compareCompanies,
+  getCreatives,
 } from './tools.js';
 
 const PORT = process.env.PORT || 3000;
@@ -84,6 +87,64 @@ const TOOLS = [
       required: ['company_name'],
     },
   },
+  {
+    name: 'get_spend_trend',
+    description:
+      'Get daily spend trend (spend per day) for a company over the last N days.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_name: {
+          type: 'string',
+          description: 'The exact advertiser name.',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of past days to aggregate (default 30)',
+        },
+      },
+      required: ['company_name'],
+    },
+  },
+  {
+    name: 'compare_companies',
+    description:
+      'Compare advertising spend, impressions, CTR and CPM across multiple companies over the last N days.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_names: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of advertiser names to compare, e.g. ["Uber", "Chime", "Binance"].',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of past days to aggregate (default 30)',
+        },
+      },
+      required: ['company_names'],
+    },
+  },
+  {
+    name: 'get_creatives',
+    description:
+      'Get recent advertising creative details (campaign, creative URL, landing page, size, mime type) for a company.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_name: {
+          type: 'string',
+          description: 'The exact advertiser name.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of creatives to return (default 5)',
+        },
+      },
+      required: ['company_name'],
+    },
+  },
 ];
 
 function createServer() {
@@ -110,6 +171,15 @@ function createServer() {
           break;
         case 'get_company_channels':
           result = await getCompanyChannels(args.company_name);
+          break;
+        case 'get_spend_trend':
+          result = await getSpendTrend(args.company_name, args.days || 30);
+          break;
+        case 'compare_companies':
+          result = await compareCompanies(args.company_names, args.days || 30);
+          break;
+        case 'get_creatives':
+          result = await getCreatives(args.company_name, args.limit || 5);
           break;
         default:
           throw new Error(`Unknown tool: ${name}`);
