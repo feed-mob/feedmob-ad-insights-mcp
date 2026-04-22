@@ -86,54 +86,42 @@ const TOOLS = [
   },
 ];
 
-const server = new Server(
-  {
-    name: 'feedmob-analytics-mcp',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
-);
+function createServer() {
+  const server = new Server(
+    { name: 'feedmob-analytics-mcp', version: '1.0.0' },
+    { capabilities: { tools: {} } }
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: TOOLS };
-});
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  try {
-    let result;
-    switch (name) {
-      case 'search_company':
-        result = await searchCompany(args.company_name, args.limit || 5);
-        break;
-      case 'count_company_records':
-        result = await countCompanyRecords(args.company_name);
-        break;
-      case 'get_company_spend':
-        result = await getCompanySpend(args.company_name, args.days || 30);
-        break;
-      case 'get_company_channels':
-        result = await getCompanyChannels(args.company_name);
-        break;
-      default:
-        throw new Error(`Unknown tool: ${name}`);
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+      let result;
+      switch (name) {
+        case 'search_company':
+          result = await searchCompany(args.company_name, args.limit || 5);
+          break;
+        case 'count_company_records':
+          result = await countCompanyRecords(args.company_name);
+          break;
+        case 'get_company_spend':
+          result = await getCompanySpend(args.company_name, args.days || 30);
+          break;
+        case 'get_company_channels':
+          result = await getCompanyChannels(args.company_name);
+          break;
+        default:
+          throw new Error(`Unknown tool: ${name}`);
+      }
+      return { content: [{ type: 'text', text: result }] };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
     }
+  });
 
-    return {
-      content: [{ type: 'text', text: result }],
-    };
-  } catch (err) {
-    return {
-      content: [{ type: 'text', text: `Error: ${err.message}` }],
-      isError: true,
-    };
-  }
-});
+  return server;
+}
 
 const app = express();
 app.use(express.json());
@@ -144,8 +132,9 @@ app.get('/health', (_req, res) => {
 });
 
 app.get('/mcp/sse', async (_req, res) => {
+  const server = createServer();
   const transport = new SSEServerTransport('/mcp/messages', res);
-  transports.set(transport.sessionId, transport);
+  transports.set(transport.sessionId, { server, transport });
 
   transport.onclose = () => {
     transports.delete(transport.sessionId);
@@ -156,13 +145,13 @@ app.get('/mcp/sse', async (_req, res) => {
 
 app.post('/mcp/messages', async (req, res) => {
   const sessionId = req.query.sessionId;
-  const transport = transports.get(sessionId);
+  const entry = transports.get(sessionId);
 
-  if (!transport) {
+  if (!entry) {
     return res.status(404).json({ error: 'Session not found' });
   }
 
-  await transport.handlePostMessage(req, res, req.body);
+  await entry.transport.handlePostMessage(req, res, req.body);
 });
 
 async function main() {
@@ -171,12 +160,6 @@ async function main() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.error(`MCP Server running on http://0.0.0.0:${PORT}`);
-  });
-
-  process.on('SIGINT', async () => {
-    await server.close();
-    disconnect();
-    process.exit(0);
   });
 }
 
