@@ -46,6 +46,7 @@ class InMemoryAuthStore {
 
   saveCode(clientId, codeChallenge, redirectUri, scopes, state) {
     const code = randomUUID();
+    console.error('[STORE] saveCode:', code.slice(0, 8), 'clientId:', clientId, 'challenge:', codeChallenge?.slice(0, 10), 'redirectUri:', redirectUri);
     this._codes.set(code, {
       clientId,
       codeChallenge,
@@ -59,8 +60,10 @@ class InMemoryAuthStore {
 
   getCode(code) {
     const record = this._codes.get(code);
+    console.error('[STORE] getCode:', code?.slice(0, 8), 'found:', !!record);
     if (!record) return null;
     if (Date.now() > record.expiresAt) {
+      console.error('[STORE] getCode: expired, deleting');
       this._codes.delete(code);
       return null;
     }
@@ -120,10 +123,13 @@ export class SimpleOAuthProvider {
     this.clientsStore = new InMemoryClientsStore();
     this._store = new InMemoryAuthStore();
     this._pending = new Map(); // state -> { clientId, codeChallenge, redirectUri, scopes }
+    // Tell the SDK to skip local PKCE validation and pass code_verifier to us
+    this.skipLocalPkceValidation = true;
   }
 
   async authorize(client, params, res) {
     const { redirectUri, scopes, state, codeChallenge } = params;
+    console.error('[AUTH] authorize called, client:', client?.client_id, 'redirectUri:', redirectUri, 'codeChallenge:', codeChallenge?.slice(0, 10), 'state:', state?.slice(0, 8));
     const stateKey = state || randomUUID();
 
     this._pending.set(stateKey, {
@@ -250,32 +256,48 @@ export class SimpleOAuthProvider {
   }
 
   async challengeForAuthorizationCode(client, authorizationCode) {
+    console.error('[AUTH] challengeForAuthorizationCode called for client:', client?.client_id, 'code:', authorizationCode?.slice(0, 8));
     const record = this._store.getCode(authorizationCode);
+    console.error('[AUTH] challengeForAuthorizationCode found record:', !!record, 'challenge:', record?.codeChallenge?.slice(0, 10));
     return record?.codeChallenge || '';
   }
 
   async exchangeAuthorizationCode(client, authorizationCode, codeVerifier, redirectUri, resource) {
-    const record = this._store.getCode(authorizationCode);
-    if (!record) throw new Error('Invalid authorization code');
-    if (record.clientId !== client.client_id) throw new Error('Client mismatch');
-    if (redirectUri && record.redirectUri !== redirectUri) throw new Error('Redirect URI mismatch');
+    console.error('[AUTH] exchangeAuthorizationCode called for client:', client?.client_id, 'code:', authorizationCode?.slice(0, 8), 'verifier length:', codeVerifier?.length, 'redirectUri:', redirectUri);
+    try {
+      const record = this._store.getCode(authorizationCode);
+      console.error('[AUTH] got code record:', !!record);
+      if (!record) throw new Error('Invalid authorization code');
+      console.error('[AUTH] client match:', record.clientId === client.client_id, 'record.clientId:', record.clientId, 'client.client_id:', client.client_id);
+      if (record.clientId !== client.client_id) throw new Error('Client mismatch');
+      if (redirectUri && record.redirectUri !== redirectUri) {
+        console.error('[AUTH] redirectUri mismatch:', record.redirectUri, 'vs', redirectUri);
+        throw new Error('Redirect URI mismatch');
+      }
 
-    // PKCE validation
-    if (record.codeChallenge) {
-      const verifier = codeVerifier || '';
-      const challenge = await pkceChallenge(verifier);
-      if (challenge !== record.codeChallenge) throw new Error('PKCE verification failed');
+      // PKCE validation
+      if (record.codeChallenge) {
+        const verifier = codeVerifier || '';
+        console.error('[AUTH] verifying PKCE, verifier length:', verifier.length, 'stored challenge prefix:', record.codeChallenge.slice(0, 10));
+        const challenge = await pkceChallenge(verifier);
+        console.error('[AUTH] computed challenge prefix:', challenge.slice(0, 10), 'match:', challenge === record.codeChallenge);
+        if (challenge !== record.codeChallenge) throw new Error('PKCE verification failed');
+      }
+
+      this._store.deleteCode(authorizationCode);
+      const { token, refreshToken, expiresAt } = this._store.saveToken(client.client_id, record.scopes);
+      console.error('[AUTH] token issued, expiresAt:', expiresAt);
+      return {
+        access_token: token,
+        refresh_token: refreshToken,
+        token_type: 'bearer',
+        expires_in: expiresAt - Math.floor(Date.now() / 1000),
+        scope: record.scopes.join(' '),
+      };
+    } catch (err) {
+      console.error('[AUTH] exchangeAuthorizationCode ERROR:', err.message, err.stack);
+      throw err;
     }
-
-    this._store.deleteCode(authorizationCode);
-    const { token, refreshToken, expiresAt } = this._store.saveToken(client.client_id, record.scopes);
-    return {
-      access_token: token,
-      refresh_token: refreshToken,
-      token_type: 'bearer',
-      expires_in: expiresAt - Math.floor(Date.now() / 1000),
-      scope: record.scopes.join(' '),
-    };
   }
 
   async exchangeRefreshToken(client, refreshToken, scopes, resource) {
@@ -312,14 +334,19 @@ export class SimpleOAuthProvider {
 
   async handleApprove(req, res) {
     const { state, api_key } = req.body || {};
+    console.error('[AUTH] handleApprove called, state:', state?.slice(0, 8));
     const pending = this._pending.get(state);
     if (!pending) {
+      console.error('[AUTH] handleApprove: pending not found');
       return res.status(400).json({ error: 'invalid_request', error_description: 'Authorization session expired or invalid' });
     }
+    console.error('[AUTH] handleApprove: pending found, clientId:', pending.clientId, 'redirectUri:', pending.redirectUri, 'codeChallenge:', pending.codeChallenge?.slice(0, 10));
 
     if (!API_KEY) {
+      console.error('[AUTH] handleApprove: no API_KEY configured, auto-approving');
       // No API key configured - auto-approve for testing
     } else if (api_key !== API_KEY) {
+      console.error('[AUTH] handleApprove: invalid API key');
       return res.status(400).json({ error: 'access_denied', error_description: 'Invalid API key' });
     }
 
@@ -331,11 +358,13 @@ export class SimpleOAuthProvider {
       pending.scopes,
       pending.state
     );
+    console.error('[AUTH] handleApprove: code saved:', code?.slice(0, 8), 'expiresAt:', this._store._codes.get(code)?.expiresAt);
 
     // Redirect back to client with authorization code
     const redirectUrl = new URL(pending.redirectUri);
     redirectUrl.searchParams.set('code', code);
     if (pending.state) redirectUrl.searchParams.set('state', pending.state);
+    console.error('[AUTH] handleApprove: redirecting to:', redirectUrl.href);
     res.redirect(302, redirectUrl.href);
   }
 }
