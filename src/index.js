@@ -215,13 +215,17 @@ app.use((req, res, next) => {
   }
 });
 
-// Single transport instance for Streamable HTTP (stateful mode)
-const transport = new StreamableHTTPServerTransport({
-  sessionIdGenerator: () => randomUUID(),
-});
+// Session management for Streamable HTTP (stateful mode)
+// Each session gets its own transport + server instance
+const sessions = new Map();
 
-const server = createServer();
-await server.connect(transport);
+function isInitializeRequest(body) {
+  if (!body) return false;
+  if (Array.isArray(body)) {
+    return body.some(msg => msg && msg.method === 'initialize');
+  }
+  return body.method === 'initialize';
+}
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'feedmob-analytics-mcp' });
@@ -229,7 +233,49 @@ app.get('/health', (_req, res) => {
 
 // Streamable HTTP: single /mcp endpoint handles both GET and POST
 app.all('/mcp', async (req, res) => {
-  await transport.handleRequest(req, res, req.body);
+  const sessionId = req.headers['mcp-session-id'];
+
+  // Route to existing session if session ID is provided and valid
+  if (sessionId && sessions.has(sessionId)) {
+    const { transport } = sessions.get(sessionId);
+    await transport.handleRequest(req, res, req.body);
+    return;
+  }
+
+  // No valid session ID - must be initialization or invalid
+  if (isInitializeRequest(req.body)) {
+    let capturedSessionId = null;
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (sid) => {
+        capturedSessionId = sid;
+      },
+      onsessionclosed: (sid) => {
+        sessions.delete(sid);
+      },
+    });
+
+    const server = createServer();
+    await server.connect(transport);
+
+    transport.onclose = () => {
+      if (capturedSessionId) {
+        sessions.delete(capturedSessionId);
+      }
+    };
+
+    await transport.handleRequest(req, res, req.body);
+
+    if (capturedSessionId) {
+      sessions.set(capturedSessionId, { transport, server });
+    }
+  } else {
+    res.status(400).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Bad Request: Server not initialized' },
+      id: null,
+    });
+  }
 });
 
 // Keep legacy SSE endpoint for backward compatibility during transition
@@ -256,7 +302,10 @@ async function main() {
   });
 
   process.on('SIGINT', async () => {
-    await server.close();
+    for (const { transport } of sessions.values()) {
+      await transport.close();
+    }
+    sessions.clear();
     disconnect();
     process.exit(0);
   });
