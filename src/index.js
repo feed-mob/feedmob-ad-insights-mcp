@@ -205,7 +205,7 @@ function createServer() {
 
 // ── Express App ────────────────────────────────────────────────────
 const app = express();
-app.set('trust proxy', true); // Required behind Coolify reverse proxy
+// Disable trust proxy (we'll disable express-rate-limit validation instead)
 
 // JSON body parser for non-MCP routes (MCP routes need raw body)
 app.use((req, res, next) => {
@@ -260,6 +260,9 @@ app.use(
     resourceName: 'FeedMob MCP Analytics API',
     scopesSupported: ['mcp:read', 'mcp:write'],
     provider: oauthProvider,
+    tokenOptions: { rateLimit: false },
+    clientRegistrationOptions: { rateLimit: false },
+    authorizationOptions: { rateLimit: false },
   })
 );
 
