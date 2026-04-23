@@ -4,8 +4,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { mcpAuthRouter, mcpAuthMetadataRouter } from '@modelcontextprotocol/sdk/dist/esm/server/auth/router.js';
-import { requireBearerAuth } from '@modelcontextprotocol/sdk/dist/esm/server/auth/middleware/bearerAuth.js';
+import { mcpAuthRouter, mcpAuthMetadataRouter } from '../node_modules/@modelcontextprotocol/sdk/dist/esm/server/auth/router.js';
+import { requireBearerAuth } from '../node_modules/@modelcontextprotocol/sdk/dist/esm/server/auth/middleware/bearerAuth.js';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
