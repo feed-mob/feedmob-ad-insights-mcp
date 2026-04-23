@@ -1,10 +1,11 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
+import { randomUUID } from 'node:crypto';
 import { connect, disconnect } from './mongo.js';
 import {
   searchCompany,
@@ -194,34 +195,56 @@ function createServer() {
 }
 
 const app = express();
-app.use(express.json());
-const transports = new Map();
+
+// Only parse JSON for non-MCP routes; MCP routes need raw body handling
+app.use((req, res, next) => {
+  if (req.path === '/mcp') {
+    let data = '';
+    req.setEncoding('utf8');
+    req.on('data', chunk => { data += chunk; });
+    req.on('end', () => {
+      try {
+        req.body = data ? JSON.parse(data) : undefined;
+      } catch {
+        req.body = undefined;
+      }
+      next();
+    });
+  } else {
+    express.json()(req, res, next);
+  }
+});
+
+// Single transport instance for Streamable HTTP (stateful mode)
+const transport = new StreamableHTTPServerTransport({
+  sessionIdGenerator: () => randomUUID(),
+});
+
+const server = createServer();
+await server.connect(transport);
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'feedmob-analytics-mcp' });
 });
 
+// Streamable HTTP: single /mcp endpoint handles both GET and POST
+app.all('/mcp', async (req, res) => {
+  await transport.handleRequest(req, res, req.body);
+});
+
+// Keep legacy SSE endpoint for backward compatibility during transition
 app.get('/mcp/sse', async (_req, res) => {
-  const server = createServer();
-  const transport = new SSEServerTransport('/mcp/messages', res);
-  transports.set(transport.sessionId, { server, transport });
+  const { SSEServerTransport } = await import('@modelcontextprotocol/sdk/server/sse.js');
+  const legacyServer = createServer();
+  const legacyTransport = new SSEServerTransport('/mcp/messages', res);
 
-  transport.onclose = () => {
-    transports.delete(transport.sessionId);
-  };
-
-  await server.connect(transport);
+  legacyTransport.onclose = () => {};
+  await legacyServer.connect(legacyTransport);
 });
 
 app.post('/mcp/messages', async (req, res) => {
-  const sessionId = req.query.sessionId;
-  const entry = transports.get(sessionId);
-
-  if (!entry) {
-    return res.status(404).json({ error: 'Session not found' });
-  }
-
-  await entry.transport.handlePostMessage(req, res, req.body);
+  // If reached here via legacy SSE path, return error
+  res.status(404).json({ error: 'Legacy SSE session not found. Please use /mcp endpoint.' });
 });
 
 async function main() {
@@ -230,6 +253,12 @@ async function main() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.error(`MCP Server running on http://0.0.0.0:${PORT}`);
+  });
+
+  process.on('SIGINT', async () => {
+    await server.close();
+    disconnect();
+    process.exit(0);
   });
 }
 
