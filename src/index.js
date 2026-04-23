@@ -4,8 +4,11 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { mcpAuthRouter, mcpAuthMetadataRouter } from '@modelcontextprotocol/sdk/dist/esm/server/auth/router.js';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/dist/esm/server/auth/middleware/bearerAuth.js';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
+import { URL } from 'node:url';
 import { connect, disconnect } from './mongo.js';
 import {
   searchCompany,
@@ -16,34 +19,17 @@ import {
   compareCompanies,
   getCreatives,
 } from './tools.js';
+import { SimpleOAuthProvider } from './auth.js';
 
 const PORT = process.env.PORT || 3000;
-const MCP_API_KEY = process.env.MCP_API_KEY;
+const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-// Simple Bearer token auth middleware for /mcp endpoint
-function requireApiKey(req, res, next) {
-  if (!MCP_API_KEY) {
-    return next();
-  }
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    return res.status(401).json({
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'Unauthorized: Missing Authorization header' },
-      id: null,
-    });
-  }
-  const [type, token] = authHeader.split(' ');
-  if (type?.toLowerCase() !== 'bearer' || token !== MCP_API_KEY) {
-    return res.status(401).json({
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'Unauthorized: Invalid token' },
-      id: null,
-    });
-  }
-  next();
-}
+// ── OAuth Provider ─────────────────────────────────────────────────
+const oauthProvider = new SimpleOAuthProvider();
+const issuerUrl = new URL(BASE_URL);
+const resourceServerUrl = new URL('/mcp', issuerUrl);
 
+// ── Tool Definitions ──────────────────────────────────────────────
 const TOOLS = [
   {
     name: 'search_company',
@@ -66,8 +52,7 @@ const TOOLS = [
   },
   {
     name: 'count_company_records',
-    description:
-      'Get the total number of advertising records for a specific company.',
+    description: 'Get the total number of advertising records for a specific company.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -115,8 +100,7 @@ const TOOLS = [
   },
   {
     name: 'get_spend_trend',
-    description:
-      'Get daily spend trend (spend per day) for a company over the last N days.',
+    description: 'Get daily spend trend (spend per day) for a company over the last N days.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -219,14 +203,15 @@ function createServer() {
   return server;
 }
 
+// ── Express App ────────────────────────────────────────────────────
 const app = express();
 
-// Only parse JSON for non-MCP routes; MCP routes need raw body handling
+// JSON body parser for non-MCP routes (MCP routes need raw body)
 app.use((req, res, next) => {
   if (req.path === '/mcp') {
     let data = '';
     req.setEncoding('utf8');
-    req.on('data', chunk => { data += chunk; });
+    req.on('data', (chunk) => { data += chunk; });
     req.on('end', () => {
       try {
         req.body = data ? JSON.parse(data) : undefined;
@@ -240,34 +225,80 @@ app.use((req, res, next) => {
   }
 });
 
-// Session management for Streamable HTTP (stateful mode)
-// Each session gets its own transport + server instance
+// URL-encoded body parser for OAuth forms
+app.use(express.urlencoded({ extended: false }));
+
+// ── OAuth 2.1 Endpoints ────────────────────────────────────────────
+
+// OAuth metadata (must be mounted at root)
+app.use(
+  mcpAuthMetadataRouter({
+    oauthMetadata: {
+      issuer: issuerUrl.href,
+      authorization_endpoint: new URL('/authorize', issuerUrl).href,
+      token_endpoint: new URL('/token', issuerUrl).href,
+      registration_endpoint: new URL('/register', issuerUrl).href,
+      revocation_endpoint: new URL('/revoke', issuerUrl).href,
+      response_types_supported: ['code'],
+      code_challenge_methods_supported: ['S256'],
+      token_endpoint_auth_methods_supported: ['client_secret_post', 'none'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
+    },
+    resourceServerUrl,
+    resourceName: 'FeedMob MCP Analytics API',
+    scopesSupported: ['mcp:read', 'mcp:write'],
+  })
+);
+
+// OAuth authorization server (must be mounted at root)
+app.use(
+  mcpAuthRouter({
+    issuerUrl,
+    baseUrl: issuerUrl,
+    resourceServerUrl,
+    resourceName: 'FeedMob MCP Analytics API',
+    scopesSupported: ['mcp:read', 'mcp:write'],
+    provider: oauthProvider,
+  })
+);
+
+// Custom approval form handler
+app.post('/auth/approve', async (req, res) => {
+  await oauthProvider.handleApprove(req, res);
+});
+
+// ── Bearer Auth Middleware ───────────────────────────────────────
+const bearerAuth = requireBearerAuth({
+  verifier: oauthProvider,
+  requiredScopes: [],
+});
+
+// ── MCP Endpoints ──────────────────────────────────────────────────
+
 const sessions = new Map();
 
 function isInitializeRequest(body) {
   if (!body) return false;
   if (Array.isArray(body)) {
-    return body.some(msg => msg && msg.method === 'initialize');
+    return body.some((msg) => msg && msg.method === 'initialize');
   }
   return body.method === 'initialize';
 }
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'feedmob-analytics-mcp' });
+  res.json({ status: 'ok', service: 'feedmob-analytics-mcp', oauth: true });
 });
 
-// Streamable HTTP: single /mcp endpoint handles both GET and POST
-app.all('/mcp', requireApiKey, async (req, res) => {
+// Streamable HTTP MCP (protected by Bearer auth)
+app.all('/mcp', bearerAuth, async (req, res) => {
   const sessionId = req.headers['mcp-session-id'];
 
-  // Route to existing session if session ID is provided and valid
   if (sessionId && sessions.has(sessionId)) {
     const { transport } = sessions.get(sessionId);
     await transport.handleRequest(req, res, req.body);
     return;
   }
 
-  // No valid session ID - must be initialization or invalid
   if (isInitializeRequest(req.body)) {
     let capturedSessionId = null;
     const transport = new StreamableHTTPServerTransport({
@@ -284,9 +315,7 @@ app.all('/mcp', requireApiKey, async (req, res) => {
     await server.connect(transport);
 
     transport.onclose = () => {
-      if (capturedSessionId) {
-        sessions.delete(capturedSessionId);
-      }
+      if (capturedSessionId) sessions.delete(capturedSessionId);
     };
 
     await transport.handleRequest(req, res, req.body);
@@ -303,8 +332,8 @@ app.all('/mcp', requireApiKey, async (req, res) => {
   }
 });
 
-// Keep legacy SSE endpoint for backward compatibility during transition
-app.get('/mcp/sse', requireApiKey, async (_req, res) => {
+// Legacy SSE (also protected)
+app.get('/mcp/sse', bearerAuth, async (_req, res) => {
   const { SSEServerTransport } = await import('@modelcontextprotocol/sdk/server/sse.js');
   const legacyServer = createServer();
   const legacyTransport = new SSEServerTransport('/mcp/messages', res);
@@ -313,17 +342,24 @@ app.get('/mcp/sse', requireApiKey, async (_req, res) => {
   await legacyServer.connect(legacyTransport);
 });
 
-app.post('/mcp/messages', requireApiKey, async (req, res) => {
-  // If reached here via legacy SSE path, return error
+app.post('/mcp/messages', bearerAuth, async (req, res) => {
   res.status(404).json({ error: 'Legacy SSE session not found. Please use /mcp endpoint.' });
 });
+
+// ── Main ───────────────────────────────────────────────────────────
 
 async function main() {
   await connect();
   console.error('Connected to MongoDB');
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.error(`MCP Server running on http://0.0.0.0:${PORT}`);
+    console.error(`MCP Server running on ${BASE_URL}`);
+    console.error(`OAuth endpoints:`);
+    console.error(`  Metadata:    ${BASE_URL}/.well-known/oauth-authorization-server`);
+    console.error(`  Authorize:   ${BASE_URL}/authorize`);
+    console.error(`  Token:       ${BASE_URL}/token`);
+    console.error(`  Register:    ${BASE_URL}/register`);
+    console.error(`  MCP:         ${BASE_URL}/mcp`);
   });
 
   process.on('SIGINT', async () => {
