@@ -205,6 +205,7 @@ function createServer() {
 
 // ── Express App ────────────────────────────────────────────────────
 const app = express();
+app.set('trust proxy', true); // Required behind Coolify reverse proxy
 
 // JSON body parser for non-MCP routes (MCP routes need raw body)
 app.use((req, res, next) => {
