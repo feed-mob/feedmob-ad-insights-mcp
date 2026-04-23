@@ -13,8 +13,8 @@ class InMemoryClientsStore {
     const full = {
       ...client,
       client_id: id,
-      client_secret: randomUUID(),
-      client_secret_expires_at: 0,
+      client_secret: client.client_secret !== undefined ? client.client_secret : randomUUID(),
+      client_secret_expires_at: client.client_secret_expires_at !== undefined ? client.client_secret_expires_at : 0,
       registration_access_token: randomUUID(),
       registration_client_uri: '',
     };
