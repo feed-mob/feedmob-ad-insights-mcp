@@ -18,6 +18,31 @@ import {
 } from './tools.js';
 
 const PORT = process.env.PORT || 3000;
+const MCP_API_KEY = process.env.MCP_API_KEY;
+
+// Simple Bearer token auth middleware for /mcp endpoint
+function requireApiKey(req, res, next) {
+  if (!MCP_API_KEY) {
+    return next();
+  }
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Unauthorized: Missing Authorization header' },
+      id: null,
+    });
+  }
+  const [type, token] = authHeader.split(' ');
+  if (type?.toLowerCase() !== 'bearer' || token !== MCP_API_KEY) {
+    return res.status(401).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Unauthorized: Invalid token' },
+      id: null,
+    });
+  }
+  next();
+}
 
 const TOOLS = [
   {
@@ -232,7 +257,7 @@ app.get('/health', (_req, res) => {
 });
 
 // Streamable HTTP: single /mcp endpoint handles both GET and POST
-app.all('/mcp', async (req, res) => {
+app.all('/mcp', requireApiKey, async (req, res) => {
   const sessionId = req.headers['mcp-session-id'];
 
   // Route to existing session if session ID is provided and valid
@@ -279,7 +304,7 @@ app.all('/mcp', async (req, res) => {
 });
 
 // Keep legacy SSE endpoint for backward compatibility during transition
-app.get('/mcp/sse', async (_req, res) => {
+app.get('/mcp/sse', requireApiKey, async (_req, res) => {
   const { SSEServerTransport } = await import('@modelcontextprotocol/sdk/server/sse.js');
   const legacyServer = createServer();
   const legacyTransport = new SSEServerTransport('/mcp/messages', res);
@@ -288,7 +313,7 @@ app.get('/mcp/sse', async (_req, res) => {
   await legacyServer.connect(legacyTransport);
 });
 
-app.post('/mcp/messages', async (req, res) => {
+app.post('/mcp/messages', requireApiKey, async (req, res) => {
   // If reached here via legacy SSE path, return error
   res.status(404).json({ error: 'Legacy SSE session not found. Please use /mcp endpoint.' });
 });
