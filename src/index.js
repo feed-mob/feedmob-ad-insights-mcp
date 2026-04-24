@@ -22,7 +22,7 @@ import {
 import { SimpleOAuthProvider } from './auth.js';
 
 const PORT = process.env.PORT || 3000;
-const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+const BASE_URL = process.env.BASE_URL || `https://localhost:${PORT}`;
 
 // ── OAuth Provider ─────────────────────────────────────────────────
 const oauthProvider = new SimpleOAuthProvider();
@@ -271,10 +271,23 @@ app.post('/auth/approve', async (req, res) => {
   await oauthProvider.handleApprove(req, res);
 });
 
+// Also serve protected resource metadata at the root path for compatibility
+// (some clients probe /.well-known/oauth-protected-resource first)
+app.get('/.well-known/oauth-protected-resource', (_req, res) => {
+  res.json({
+    resource: resourceServerUrl.href,
+    authorization_servers: [issuerUrl.href],
+    scopes_supported: ['mcp:read', 'mcp:write'],
+    bearer_methods_supported: ['header'],
+  });
+});
+
 // ── Bearer Auth Middleware ───────────────────────────────────────
+const resourceMetadataUrl = new URL('/.well-known/oauth-protected-resource' + (resourceServerUrl.pathname === '/' ? '' : resourceServerUrl.pathname), issuerUrl).href;
 const bearerAuth = requireBearerAuth({
   verifier: oauthProvider,
   requiredScopes: [],
+  resourceMetadataUrl,
 });
 
 // ── MCP Endpoints ──────────────────────────────────────────────────
@@ -294,7 +307,8 @@ app.get('/health', (_req, res) => {
 });
 
 // Streamable HTTP MCP (protected by Bearer auth)
-app.all('/mcp', bearerAuth, async (req, res) => {
+// Handle both /mcp and /mcp/ for Claude Desktop compatibility
+app.all(['/mcp', '/mcp/'], bearerAuth, async (req, res) => {
   const sessionId = req.headers['mcp-session-id'];
 
   if (sessionId && sessions.has(sessionId)) {

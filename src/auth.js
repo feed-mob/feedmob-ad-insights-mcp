@@ -113,8 +113,9 @@ class InMemoryAuthStore {
 const API_KEY = process.env.MCP_API_KEY;
 
 function getBaseUrl(req) {
+  if (process.env.BASE_URL) return new URL(process.env.BASE_URL);
   const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${process.env.PORT || 3000}`;
-  const proto = req.headers['x-forwarded-proto'] || 'http';
+  const proto = req.headers['x-forwarded-proto'] || 'https';
   return new URL(`${proto}://${host}`);
 }
 
@@ -290,7 +291,7 @@ export class SimpleOAuthProvider {
       return {
         access_token: token,
         refresh_token: refreshToken,
-        token_type: 'bearer',
+        token_type: 'Bearer',
         expires_in: expiresAt - Math.floor(Date.now() / 1000),
         scope: record.scopes.join(' '),
       };
