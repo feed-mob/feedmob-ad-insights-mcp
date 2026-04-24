@@ -317,6 +317,15 @@ export class SimpleOAuthProvider {
   }
 
   async verifyAccessToken(token) {
+    // Accept API_KEY as a static bearer token for mcp-remote bridge mode
+    if (API_KEY && token === API_KEY) {
+      return {
+        token,
+        clientId: 'api-key',
+        scopes: ['mcp:read', 'mcp:write'],
+        expiresAt: Math.floor(Date.now() / 1000) + 86400 * 365,
+      };
+    }
     const record = this._store.getToken(token);
     if (!record) throw new Error('Invalid or expired token');
     return {
