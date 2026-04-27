@@ -231,15 +231,28 @@ app.use(express.urlencoded({ extended: false }));
 
 // ── OAuth 2.1 Endpoints ────────────────────────────────────────────
 
-// OAuth metadata (must be mounted at root)
+// Shared OAuth router config
+const oauthRouterConfig = {
+  issuerUrl,
+  baseUrl: issuerUrl,
+  resourceServerUrl,
+  resourceName: 'FeedMob MCP Analytics API',
+  scopesSupported: ['mcp:read', 'mcp:write'],
+  provider: oauthProvider,
+  tokenOptions: { rateLimit: false },
+  clientRegistrationOptions: { rateLimit: false },
+  authorizationOptions: { rateLimit: false },
+};
+
+// OAuth metadata (advertise /oauth/* paths per Claude Connector standard)
 app.use(
   mcpAuthMetadataRouter({
     oauthMetadata: {
       issuer: issuerUrl.href,
-      authorization_endpoint: new URL('/authorize', issuerUrl).href,
-      token_endpoint: new URL('/token', issuerUrl).href,
-      registration_endpoint: new URL('/register', issuerUrl).href,
-      revocation_endpoint: new URL('/revoke', issuerUrl).href,
+      authorization_endpoint: new URL('/oauth/authorize', issuerUrl).href,
+      token_endpoint: new URL('/oauth/token', issuerUrl).href,
+      registration_endpoint: new URL('/oauth/register', issuerUrl).href,
+      revocation_endpoint: new URL('/oauth/revoke', issuerUrl).href,
       response_types_supported: ['code'],
       code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['client_secret_post', 'none'],
@@ -251,20 +264,11 @@ app.use(
   })
 );
 
-// OAuth authorization server (must be mounted at root)
-app.use(
-  mcpAuthRouter({
-    issuerUrl,
-    baseUrl: issuerUrl,
-    resourceServerUrl,
-    resourceName: 'FeedMob MCP Analytics API',
-    scopesSupported: ['mcp:read', 'mcp:write'],
-    provider: oauthProvider,
-    tokenOptions: { rateLimit: false },
-    clientRegistrationOptions: { rateLimit: false },
-    authorizationOptions: { rateLimit: false },
-  })
-);
+// OAuth authorization server at /oauth/* (Claude Connector standard paths)
+app.use('/oauth', mcpAuthRouter(oauthRouterConfig));
+
+// OAuth authorization server at root (backward compatibility for Claude Code CLI)
+app.use(mcpAuthRouter(oauthRouterConfig));
 
 // Custom approval form handler
 app.post('/auth/approve', async (req, res) => {
